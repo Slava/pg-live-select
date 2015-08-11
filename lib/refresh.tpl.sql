@@ -1,26 +1,38 @@
-/*
- * Template for refreshing a result set, only returning unknown rows
- * Accepts 2 arguments:
- * query: original query string
- * hashParam: count of params in original query + 1
+/* Creates a temporary table if such doesn't exists to store the
+ * hashes of the previously computed result.
+ * Returns the changed rows with extra columns 'hash' and 'delta_id'.
+ * If the query fields are all set to null, the row was removed from the set.
+ *
+ * Arguments: QUERY, QUERY_NAME, DELTA_ID_TYPE (int or string are common)
  */
+CREATE TEMP TABLE IF NOT EXISTS $$QUERY_NAME$$_cache (id $$DELTA_ID_TYPE$$, _hash TEXT);
 WITH
-  res AS ($$query$$),
-  data AS (
-    SELECT
-      res.*,
-      MD5(CAST(ROW_TO_JSON(res.*) AS TEXT)) AS _hash,
-      ROW_NUMBER() OVER () AS _index
-    FROM res),
-  data2 AS (
-    SELECT
-      1 AS _added,
-      data.*
-    FROM data
-    WHERE NOT (_hash = ANY ($$$hashParam$$)))
-SELECT
-  data2.*,
-  data._hash AS _hash
-FROM data
-LEFT JOIN data2
-  ON (data._index = data2._index)
+  res as ($$QUERY$$),
+  vals as (SELECT *, MD5(CAST(ROW_TO_JSON(res.*) AS TEXT)) AS hash FROM res),
+  updated as (
+    UPDATE $$QUERY_NAME$$_cache
+    SET _hash = vals.hash
+    FROM vals
+    WHERE _hash <> hash and $$QUERY_NAME$$_cache.id = vals.id
+    RETURNING vals.id
+  ),
+  inserted as (
+    INSERT INTO $$QUERY_NAME$$_cache(id, _hash)
+    (
+      SELECT id, hash
+      FROM vals
+      WHERE id NOT IN (SELECT id from $$QUERY_NAME$$_cache)
+    )
+    RETURNING id
+  ),
+  deleted as (
+    DELETE FROM $$QUERY_NAME$$_cache
+    WHERE id NOT IN (SELECT id from vals)
+    RETURNING id
+  )
+
+SELECT deltas.id AS delta_id, vals.* FROM (
+  SELECT * FROM updated UNION
+  SELECT * FROM inserted UNION
+  SELECT * FROM deleted
+) AS deltas LEFT OUTER JOIN vals ON deltas.id = vals.id;

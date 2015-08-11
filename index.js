@@ -6,7 +6,8 @@ var util = require('util');
 
 var _ = require('lodash');
 var pg = require('pg');
-var murmurHash   = require('murmurhash-js').murmur3
+var pgParse = require('pg-connection-string').parse;
+var murmurHash   = require('murmurhash-js').murmur3;
 
 var querySequence = require('./lib/querySequence');
 var SelectHandle = require('./lib/SelectHandle');
@@ -45,20 +46,20 @@ function LivePg(connStr, channel) {
 util.inherits(LivePg, EventEmitter);
 module.exports = LivePg;
 
-LivePg.prototype.select = function(query, params, triggers) {
+LivePg.prototype.select = function (query, params, triggers) {
   var self = this;
 
   // Allow omission of params argument
-  if(typeof params === 'object' && !(params instanceof Array)) {
+  if (typeof params === 'object' && !(params instanceof Array)) {
     triggers = params;
     params = [];
-  } else if(typeof params === 'undefined') {
+  } else if (typeof params === 'undefined') {
     params = [];
   }
 
-  if(typeof query !== 'string')
+  if (typeof query !== 'string')
     throw new Error('QUERY_STRING_MISSING');
-  if(!(params instanceof Array))
+  if (!(params instanceof Array))
     throw new Error('PARAMS_ARRAY_MISMATCH');
 
   var queryHash = murmurHash(JSON.stringify([ query, params ]));
@@ -68,13 +69,13 @@ LivePg.prototype.select = function(query, params, triggers) {
   self._initSelect(query, params, triggers, queryHash, handle);
 
   return handle;
-}
+};
 
-LivePg.prototype.cleanup = function(callback) {
+LivePg.prototype.cleanup = function (callback) {
   var self = this;
   self.notifyDone && self.notifyDone();
 
-  var queries = Object.keys(self.allTablesUsed).map(function(table) {
+  var queries = Object.keys(self.allTablesUsed).map(function (table) {
     return 'DROP TRIGGER IF EXISTS "' +
       self.channel + '_' + table + '" ON "' + table + '"';
   });
@@ -82,48 +83,50 @@ LivePg.prototype.cleanup = function(callback) {
   queries.push('DROP FUNCTION "' + self.triggerFun + '"() CASCADE');
 
   querySequence(self.connStr, queries, callback);
-}
+};
 
-LivePg.prototype._initTriggerFun = function() {
+LivePg.prototype._initTriggerFun = function () {
   var self = this;
   querySequence(self.connStr, [
     replaceQueryArgs(TRIGGER_QUERY_TPL,
       { funName: self.triggerFun, channel: self.channel })
-  ], function(error) {
-    if(error) return self.emit('error', error);
+  ], function (error) {
+    if (error) { self.emit('error', error); return; }
   });
-}
+};
 
-LivePg.prototype._initListener = function() {
+LivePg.prototype._initListener = function () {
   var self = this;
-  pg.connect(self.connStr, function(error, client, done) {
-    if(error) return self.emit('error', error);
+  pg.connect(
+    _.extend({poolSize: 1}, pgParse(self.connStr)), function (error, client, done) {
+    if (error) { self.emit('error', error); return; }
 
     self.notifyClient = client;
     self.notifyDone = done;
 
-    client.query('LISTEN "' + self.channel + '"', function(error, result) {
-      if(error) return self.emit('error', error);
+    client.query('LISTEN "' + self.channel + '"', function (error, result) {
+      if (error) { self.emit('error', error); return; }
     });
 
-    client.on('notification', function(info) {
-      if(info.channel === self.channel) {
+    client.on('notification', function (info) {
+      if (info.channel === self.channel) {
         var payload = self._processNotification(info.payload);
 
         // Only continue if full notification has arrived
-        if(payload === null) return;
+        if (payload === null) return;
 
         try {
-          var payload = JSON.parse(payload);
+          payload = JSON.parse(payload);
         } catch(error) {
-          return self.emit('error',
+          self.emit('error',
             new Error('INVALID_NOTIFICATION ' + payload));
+          return;
         }
 
-        if(payload.table in self.allTablesUsed) {
-          self.allTablesUsed[payload.table].forEach(function(queryHash) {
+        if (payload.table in self.allTablesUsed) {
+          self.allTablesUsed[payload.table].forEach(function (queryHash) {
             var queryBuffer = self.selectBuffer[queryHash];
-            if((queryBuffer.triggers
+            if ((queryBuffer.triggers
                 // Check for true response from manual trigger
                 && payload.table in queryBuffer.triggers
                 && (payload.op === 'UPDATE'
@@ -143,25 +146,25 @@ LivePg.prototype._initListener = function() {
           });
         }
       }
-    })
+    });
   });
-}
+};
 
-LivePg.prototype._initUpdateLoop = function() {
+LivePg.prototype._initUpdateLoop = function () {
   var self = this;
 
-  var performNextUpdate = function() {
-    if(self.waitingToUpdate.length !== 0) {
+  var performNextUpdate = function () {
+    if (self.waitingToUpdate.length !== 0) {
       var queriesToUpdate =
         _.uniq(self.waitingToUpdate.splice(0, self.waitingToUpdate.length));
       var updateReturned = 0;
 
-      queriesToUpdate.forEach(function(queryHash) {
-        self._updateQuery(queryHash, function(error) {
+      queriesToUpdate.forEach(function (queryHash) {
+        self._updateQuery(queryHash, function (error) {
           updateReturned++;
-          if(error) self.emit('error', error);
-          if(updateReturned === queriesToUpdate.length) performNextUpdate();
-        })
+          if (error) self.emit('error', error);
+          if (updateReturned === queriesToUpdate.length) performNextUpdate();
+        });
       });
     } else {
       // No queries to update, wait for set duration
@@ -170,14 +173,14 @@ LivePg.prototype._initUpdateLoop = function() {
   };
 
   performNextUpdate();
-}
+};
 
-LivePg.prototype._processNotification = function(payload) {
+LivePg.prototype._processNotification = function (payload) {
   var self = this;
   var argSep = [];
 
   // Notification is 4 parts split by colons
-  while(argSep.length < 3) {
+  while (argSep.length < 3) {
     var lastPos = argSep.length !== 0 ? argSep[argSep.length - 1] + 1 : 0;
     argSep.push(payload.indexOf(':', lastPos));
   }
@@ -188,15 +191,15 @@ LivePg.prototype._processNotification = function(payload) {
   var msgPart   = payload.slice(argSep[2] + 1, argSep[3]);
   var fullMsg;
 
-  if(pageCount > 1) {
+  if (pageCount > 1) {
     // Piece together multi-part messages
-    if(!(msgHash in self.waitingPayloads)) {
+    if (!(msgHash in self.waitingPayloads)) {
       self.waitingPayloads[msgHash] =
-        _.range(pageCount).map(function() { return null });
+        _.range(pageCount).map(function () { return null; });
     }
     self.waitingPayloads[msgHash][curPage - 1] = msgPart;
 
-    if(self.waitingPayloads[msgHash].indexOf(null) !== -1) {
+    if (self.waitingPayloads[msgHash].indexOf(null) !== -1) {
       return null; // Must wait for full message
     }
 
@@ -210,22 +213,23 @@ LivePg.prototype._processNotification = function(payload) {
   }
 
   return fullMsg;
-}
+};
 
 LivePg.prototype._initSelect =
-function(query, params, triggers, queryHash, handle) {
+function (query, params, triggers, queryHash, handle) {
   var self = this;
-  if(queryHash in self.selectBuffer) {
+  if (queryHash in self.selectBuffer) {
     // Same query already exists
     // Give a chance for event listener to be added
-    process.nextTick(function() {
+    process.nextTick(function () {
       var queryBuffer = self.selectBuffer[queryHash];
 
       queryBuffer.handlers.push(handle);
 
       // Initial results from cache
-      handle.emit('update',
-        { removed: null, moved: null, copied: null, added: queryBuffer.data },
+      handle.emit(
+        'update',
+        { removed: [], changed: [], added: queryBuffer.data },
         queryBuffer.data);
     });
   } else {
@@ -234,17 +238,17 @@ function(query, params, triggers, queryHash, handle) {
       query         : query,
       params        : params,
       triggers      : triggers,
-      data          : [],
+      data          : {},
       handlers      : [ handle ],
       notifications : [],
       initialized   : false
-    }
+    };
 
-    var attachTriggers = function(tablesUsed) {
+    var attachTriggers = function (tablesUsed) {
       var queries = [];
 
-      tablesUsed.forEach(function(table) {
-        if(!(table in self.allTablesUsed)) {
+      tablesUsed.forEach(function (table) {
+        if (!(table in self.allTablesUsed)) {
           self.allTablesUsed[table] = [ queryHash ];
           var triggerName = self.channel + '_' + table;
           queries.push(
@@ -253,104 +257,120 @@ function(query, params, triggers, queryHash, handle) {
             'CREATE TRIGGER "' + triggerName + '" ' +
               'AFTER INSERT OR UPDATE OR DELETE ON "' + table + '" ' +
               'FOR EACH ROW EXECUTE PROCEDURE "' + self.triggerFun + '"()');
-        } else if(self.allTablesUsed[table].indexOf(queryHash) === -1) {
+        } else if (self.allTablesUsed[table].indexOf(queryHash) === -1) {
           self.allTablesUsed[table].push(queryHash);
         }
       });
 
-      if(queries.length !== 0) {
+      if (queries.length !== 0) {
         querySequence(self.connStr, queries, readyToUpdate);
       } else {
         readyToUpdate();
       }
     };
 
-    var readyToUpdate = function(error) {
-      if(error) return handle.emit('error', error);
+    var readyToUpdate = function (error) {
+      if (error) { handle.emit('error', error); return; }
       // Retrieve initial results
-      self.waitingToUpdate.push(queryHash)
+      self.waitingToUpdate.push(queryHash);
     };
 
     // Determine dependent tables, from cache if possible
-    if(queryHash in self.tablesUsedCache) {
+    if (queryHash in self.tablesUsedCache) {
       attachTriggers(self.tablesUsedCache[queryHash]);
     } else {
       findDependentRelations(self.connStr, query, params,
-        function(error, result) {
-          if(error) return handle.emit('error', error);
+        function (error, result) {
+          if (error) { handle.emit('error', error); return; }
           self.tablesUsedCache[queryHash] = result;
           attachTriggers(result);
-        }
-      );
+        });
     }
   }
 }
 
-LivePg.prototype._updateQuery = function(queryHash, callback) {
+LivePg.prototype._updateQuery = function (queryHash, callback) {
   var self = this;
   var queryBuffer = self.selectBuffer[queryHash];
+  var client = self.notifyClient;
 
-  var oldHashes = queryBuffer.data.map(function(row) { return row._hash; });
-
-  pg.connect(self.connStr, function(error, client, done) {
-    if(error) return callback && callback(error);
-    client.query(
-      replaceQueryArgs(REFRESH_QUERY_TPL, {
-        query: queryBuffer.query,
-        hashParam: queryBuffer.params.length + 1
-      }),
-      queryBuffer.params.concat([ oldHashes ]),
-      function(error, result) {
-        done();
-        if(error) return callback && callback(error);
-        processDiff(result.rows);
+  client.query(
+    replaceQueryArgs(REFRESH_QUERY_TPL, {
+      QUERY: queryBuffer.query,
+      QUERY_NAME: 'query_' + queryHash, // XXX should be configurable
+      DELTA_ID_TYPE: 'int' // XXX shouldn't be hardcoded
+    }),
+    function (error, result) {
+      if (error) {
+        callback && callback(error);
+        return;
       }
-    );
-  });
+      processDiff(result.rows);
+    }
+  );
 
-  var processDiff = function(result) {
-    var diff = differ.generate(oldHashes, result);
+  var processDiff = function (result) {
     var eventArgs;
 
-    if(diff !== null) {
-      var newData = differ.apply(queryBuffer.data, diff);
-      queryBuffer.data = newData;
-
-      var eventArgs = [
+    if (result.length !== 0) {
+      var changes = {
+        removed: [],
+        changed: [],
+        added: []
+      };
+      eventArgs = [
         'update',
-        filterHashProperties(diff),
-        filterHashProperties(newData)
+        changes
       ];
 
-    } else if(queryBuffer.initialized === false) {
+      result.forEach(function (row) {
+        // is it a removed row?
+        if (! row.hash) {
+          changes.removed.push(filterHashProperties(
+            queryBuffer.data[row.delta_id]));
+          delete queryBuffer.data[row.delta_id];
+          return;
+        }
+
+        // updated or new row
+        if (! queryBuffer.data[row.delta_id]) {
+          changes.added.push(filterHashProperties(row));
+        } else {
+          changes.changed.push([
+            filterHashProperties(row),
+            filterHashProperties(queryBuffer.data[row.delta_id])]);
+        }
+        // update the buffer
+        queryBuffer.data[row.delta_id] = row;
+      });
+    } else if (queryBuffer.initialized === false) {
       // Initial update with empty data
-      var eventArgs = [
+      eventArgs = [
         'update',
-        { removed: null, moved: null, copied: null, added: [] },
+        { removed: [], changed: [], added: [] },
         []
       ];
     }
 
-    if(eventArgs) {
-      queryBuffer.handlers.forEach(function(handle) {
+    if (eventArgs) {
+      queryBuffer.handlers.forEach(function (handle) {
         handle.emit.apply(handle, eventArgs);
       });
 
-      queryBuffer.initialized = true
+      queryBuffer.initialized = true;
     }
 
     // Update process finished
     callback && callback();
-  }
-
-}
+  };
+};
 
 function loadQueryFromFile(filename) {
   return fs.readFileSync(path.join(__dirname, filename)).toString();
 }
 
 function replaceQueryArgs(query, args) {
-  Object.keys(args).forEach(function(argName) {
+  Object.keys(args).forEach(function (argName) {
     query = query.replace(
       new RegExp('\\\$\\\$' + argName + '\\\$\\\$', 'g'), args[argName]);
   });
@@ -359,26 +379,25 @@ function replaceQueryArgs(query, args) {
 }
 
 function findDependentRelations(connStr, query, params, callback) {
-  var nodeWalker = function(tree) {
+  var nodeWalker = function (tree) {
     var found = [];
 
-    var checkNode = function(node) {
-      if('Plans' in node) found = found.concat(nodeWalker(node['Plans']));
-      if('Relation Name' in node) found.push(node['Relation Name']);
-    }
+    var checkNode = function (node) {
+      if ('Plans' in node) found = found.concat(nodeWalker(node['Plans']));
+      if ('Relation Name' in node) found.push(node['Relation Name']);
+    };
 
-    if(tree instanceof Array) tree.forEach(checkNode);
+    if (tree instanceof Array) tree.forEach(checkNode);
     else checkNode(tree);
 
     return found;
-  }
+  };
 
-  pg.connect(connStr, function(error, client, done) {
-    if(error) return callback && callback(error);
+  pg.connect(connStr, function (error, client, done) {
+    if (error) { callback && callback(error); return; }
     client.query('EXPLAIN (FORMAT JSON) ' + query, params,
-      function(error, result) {
-        done();
-        if(error) return callback && callback(error);
+      function (error, result) {
+        if (error) { callback && callback(error); return; }
         callback(undefined, nodeWalker(result.rows[0]['QUERY PLAN'][0]['Plan']));
       }
     );
@@ -386,15 +405,13 @@ function findDependentRelations(connStr, query, params, callback) {
 }
 
 function filterHashProperties(diff) {
-  if(diff instanceof Array) {
-    return diff.map(function(event) {
-      return _.omit(event, '_hash')
+  if (diff instanceof Array) {
+    return diff.map(function (event) {
+      return _.omit(event, 'hash', 'delta_id');
     });
+  } else if (diff instanceof Object) {
+    return _.omit(diff, 'hash', 'delta_id');
   }
-  // Otherwise, diff is object with arrays for keys
-  _.forOwn(diff, function(rows, key) {
-    diff[key] = filterHashProperties(rows)
-  });
-  return diff;
+  throw new Error('bad call of filterHashProperties ' + JSON.stringify(diff));
 }
 
