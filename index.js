@@ -31,6 +31,7 @@ function LivePg(connStr, channel) {
   self.triggerFun = 'livepg_' + channel;
   self.notifyClient = null;
   self.notifyDone = null;
+  self.updateClient = null;
   self.waitingPayloads = {};
   self.waitingToUpdate = [];
   self.selectBuffer    = {};
@@ -98,7 +99,7 @@ LivePg.prototype._initTriggerFun = function () {
 LivePg.prototype._initListener = function () {
   var self = this;
   pg.connect(
-    _.extend({poolSize: 1}, pgParse(self.connStr)), function (error, client, done) {
+    self.connStr, function (error, client, done) {
     if (error) { self.emit('error', error); return; }
 
     self.notifyClient = client;
@@ -289,25 +290,41 @@ function (query, params, triggers, queryHash, handle) {
   }
 }
 
+LivePg.prototype._getUpdateClient = function (cb) {
+  var self = this;
+  if (! self.updateClient) {
+    pg.connect(_.extend({poolSize: 1}, pgParse(self.connStr)), function (err, client) {
+      if (err) {
+        cb(err);
+        return;
+      }
+      self.updateClient = client;
+      cb(err, client);
+    });
+  } else {
+    cb(null, self.updateClient);
+  }
+};
+
 LivePg.prototype._updateQuery = function (queryHash, callback) {
   var self = this;
   var queryBuffer = self.selectBuffer[queryHash];
-  var client = self.notifyClient;
-
-  client.query(
-    replaceQueryArgs(REFRESH_QUERY_TPL, {
-      QUERY: queryBuffer.query,
-      QUERY_NAME: 'query_' + queryHash, // XXX should be configurable
-      DELTA_ID_TYPE: 'int' // XXX shouldn't be hardcoded
-    }),
-    function (error, result) {
-      if (error) {
-        callback && callback(error);
-        return;
+  self._getUpdateClient(function (err, client) {
+    client.query(
+      replaceQueryArgs(REFRESH_QUERY_TPL, {
+        QUERY: queryBuffer.query,
+        QUERY_NAME: 'query_' + queryHash, // XXX should be configurable
+        DELTA_ID_TYPE: 'int' // XXX shouldn't be hardcoded
+      }),
+      function (error, result) {
+        if (error) {
+          callback && callback(error);
+          return;
+        }
+        processDiff(result.rows);
       }
-      processDiff(result.rows);
-    }
-  );
+    );
+  });
 
   var processDiff = function (result) {
     var eventArgs;
@@ -338,7 +355,7 @@ LivePg.prototype._updateQuery = function (queryHash, callback) {
         } else {
           changes.changed.push([
             filterHashProperties(row),
-            filterHashProperties(queryBuffer.data[row.delta_id])]);
+            filterHashProperties(queryBuffer[row.delta_id])]);
         }
         // update the buffer
         queryBuffer.data[row.delta_id] = row;
@@ -414,4 +431,3 @@ function filterHashProperties(diff) {
   }
   throw new Error('bad call of filterHashProperties ' + JSON.stringify(diff));
 }
-
