@@ -365,7 +365,7 @@ LivePg.prototype._updateQuery = function (queryHash, callback) {
         } else {
           changes.changed.push([
             filterHashProperties(row),
-            filterHashProperties(queryBuffer[row.delta_id])]);
+            filterHashProperties(queryBuffer.data[row.delta_id])]);
         }
         // update the buffer
         queryBuffer.data[row.delta_id] = row;
