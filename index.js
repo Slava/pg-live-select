@@ -6,6 +6,7 @@ var util = require('util');
 
 var _ = require('lodash');
 var pg = require('pg');
+var pgClient = require('pg/lib/client');
 var pgParse = require('pg-connection-string').parse;
 var murmurHash   = require('murmurhash-js').murmur3;
 
@@ -32,6 +33,7 @@ function LivePg(connStr, channel) {
   self.notifyClient = null;
   self.notifyDone = null;
   self.updateClient = null;
+  self.updateDone = null;
   self.waitingPayloads = {};
   self.waitingToUpdate = [];
   self.selectBuffer    = {};
@@ -75,6 +77,7 @@ LivePg.prototype.select = function (query, params, triggers) {
 LivePg.prototype.cleanup = function (callback) {
   var self = this;
   self.notifyDone && self.notifyDone();
+  self.updateDone && self.updateDone();
 
   var queries = Object.keys(self.allTablesUsed).map(function (table) {
     return 'DROP TRIGGER IF EXISTS "' +
@@ -228,10 +231,13 @@ function (query, params, triggers, queryHash, handle) {
       queryBuffer.handlers.push(handle);
 
       // Initial results from cache
+      var added = [];
+      _.each(queryBuffer.data, function (doc, id) {
+        added.push(filterHashProperties(doc));
+      });
       handle.emit(
         'update',
-        { removed: [], changed: [], added: queryBuffer.data },
-        queryBuffer.data);
+        { removed: [], changed: [], added: added });
     });
   } else {
     // Initialize result set cache
@@ -293,12 +299,16 @@ function (query, params, triggers, queryHash, handle) {
 LivePg.prototype._getUpdateClient = function (cb) {
   var self = this;
   if (! self.updateClient) {
-    pg.connect(_.extend({poolSize: 1}, pgParse(self.connStr)), function (err, client) {
+    self.updateClient = new pgClient(self.connStr);
+    self.updateClient.connect(function (err, client) {
       if (err) {
         cb(err);
         return;
       }
       self.updateClient = client;
+      self.updateDone = function () {
+        // XXX clean up here
+      };
       cb(err, client);
     });
   } else {
