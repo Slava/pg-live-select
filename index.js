@@ -424,11 +424,17 @@ function findDependentRelations(connStr, query, params, callback) {
     if (error) { callback && callback(error); return; }
     client.query('EXPLAIN (FORMAT JSON) ' + query, params,
       function (error, result) {
-        if (error) { callback && callback(error); return; }
-        callback(undefined, nodeWalker(result.rows[0]['QUERY PLAN'][0]['Plan']));
+        if (error) {
+          done();
+          callback && callback(error);
+          return;
+        }
+
+        var nodeWalkerResult = nodeWalker(result.rows[0]['QUERY PLAN'][0]['Plan']);
 
         // close connection
         done();
+        callback(undefined, nodeWalkerResult);
       }
     );
   });
